@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Galerie des travaux</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <header id="top"></header>
+  <section class="hero">
+    <div class="wrap">
+      <div class="panel">
+        <h1 id="heroTitle"></h1>
+        <p>Découvrez les corpus constitués par les étudiants au cours du semestre et ouvrez leurs présentations.</p>
+      </div>
+    </div>
+  </section>
+  <main class="wrap" id="main">
+    <div class="toolbar">
+      <div class="search">
+        <label class="lbl" for="q">Rechercher un travail</label>
+        <input type="search" id="q" placeholder="Titre du corpus ou nom d’un étudiant" autocomplete="off">
+      </div>
+      <p class="count" id="count" aria-live="polite"></p>
+    </div>
+    <div id="status" class="notice" hidden></div>
+    <div id="grid" class="grid"></div>
+    <div id="empty" class="empty" hidden></div>
+  </main>
+  <dialog id="dlg" aria-labelledby="dlgTitle">
+    <div class="dlg-head"><button class="btn secondary small" id="dlgClose" type="button">Fermer ✕</button></div>
+    <div class="dlg-body detail" id="dlgBody"></div>
+  </dialog>
+  <footer id="foot"></footer>
+
+  <script src="assets/config.js"></script>
+  <script src="assets/store.js"></script>
+  <script src="assets/ui.js"></script>
+  <script>
+    (function () {
+      var h = UI.h, cfg = APP_CONFIG, items = [];
+      var grid = document.getElementById('grid'), empty = document.getElementById('empty'), count = document.getElementById('count');
+      var dlg = document.getElementById('dlg'), body = document.getElementById('dlgBody'), status = document.getElementById('status');
+      document.getElementById('heroTitle').textContent = cfg.siteTitle + ' — ' + cfg.siteSubtitle;
+      UI.mountChrome('index');
+
+      function names(f) { return (f.members || '').split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean); }
+      function norm(s) { return (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); }
+
+      function card(f) {
+        var pres = UI.safeUrl(f.presentationLink), img = UI.safeImage(f.imageData);
+        return h('article', { class: 'card' },
+          h('div', { class: 'thumb' }, img ? h('img', { src: img, alt: f.imageAlt || '', loading: 'lazy' }) : null),
+          h('div', { class: 'body' },
+            h('h3', {}, f.title),
+            h('p', { class: 'names' }, names(f).join(' · ')),
+            h('div', { class: 'btns' },
+              pres ? h('a', { class: 'btn small', href: pres, target: '_blank', rel: 'noopener noreferrer', 'aria-label': 'Voir la présentation : ' + f.title }, 'Voir la présentation') : null,
+              h('button', { class: 'btn secondary small', type: 'button', 'aria-label': 'Voir la fiche détaillée : ' + f.title, onclick: function () { openDetail(f); } }, 'Fiche détaillée'))));
+      }
+
+      function openDetail(f, keepHash) {
+        var pres = UI.safeUrl(f.presentationLink), corp = UI.safeUrl(f.corpusLink), img = UI.safeImage(f.imageData);
+        body.textContent = '';
+        UI.append(body,
+          img ? h('img', { class: 'cover', src: img, alt: f.imageAlt || '' }) : null,
+          f.imageCredit ? h('p', { class: 'credit' }, 'Crédit image : ' + f.imageCredit) : null,
+          h('h2', { id: 'dlgTitle' }, f.title),
+          h('p', {}, names(f).join(' · ')),
+          h('div', { class: 'chips', 'aria-label': 'Langues' }, (f.languages || '').split(',').map(function (l) { l = l.trim(); return l ? h('span', { class: 'chip' }, l) : null; })),
+          h('h4', {}, 'Présentation du corpus'), h('p', {}, f.summary),
+          h('h4', {}, 'Thématique et objectifs'), h('p', {}, f.theme),
+          h('div', { class: 'actions' },
+            pres ? h('a', { class: 'btn', href: pres, target: '_blank', rel: 'noopener noreferrer' }, 'Voir la présentation') : null,
+            corp ? h('a', { class: 'btn secondary', href: corp, target: '_blank', rel: 'noopener noreferrer' }, 'Accéder au corpus') : null));
+        if (!keepHash) history.replaceState(null, '', '#fiche=' + encodeURIComponent(f.id));
+        if (!dlg.open) dlg.showModal();
+      }
+      function closeDetail() { if (dlg.open) dlg.close(); history.replaceState(null, '', location.pathname + location.search); }
+      document.getElementById('dlgClose').addEventListener('click', closeDetail);
+      dlg.addEventListener('click', function (e) { if (e.target === dlg) closeDetail(); });
+      dlg.addEventListener('cancel', function () { history.replaceState(null, '', location.pathname + location.search); });
+
+      function render() {
+        var q = norm(document.getElementById('q').value.trim());
+        var list = items.filter(function (f) { return !q || norm(f.title).indexOf(q) >= 0 || norm(f.members).indexOf(q) >= 0; });
+        grid.textContent = '';
+        list.forEach(function (f) { grid.append(card(f)); });
+        count.textContent = items.length ? list.length + ' travail' + (list.length > 1 ? 'x' : '') + ' affiché' + (list.length > 1 ? 's' : '') + ' sur ' + items.length : '';
+        empty.hidden = list.length > 0;
+        empty.textContent = items.length ? 'Aucun travail ne correspond à votre recherche.' : 'Les travaux seront publiés ici après le séminaire. Revenez bientôt.';
+      }
+      document.getElementById('q').addEventListener('input', render);
+
+      Store.init().then(function () { return Store.listPublished(); }).then(function (list) {
+        items = list.sort(function (a, b) { return (a.title || '').localeCompare(b.title || '', 'fr'); });
+        render();
+        var m = /#fiche=([^&]+)/.exec(location.hash);
+        if (m) { var f = items.filter(function (x) { return x.id === decodeURIComponent(m[1]); })[0]; if (f) openDetail(f, true); }
+      }).catch(function (e) {
+        UI.message(status, 'error', 'Impossible de charger les travaux pour le moment. ' + UI.friendlyError(e));
+        empty.hidden = true;
+      });
+    })();
+  </script>
+</body>
+</html>

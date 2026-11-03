@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Espace de gestion</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <header id="top"></header>
+  <main class="wrap" id="main">
+    <h1>Espace de gestion</h1>
+    <div id="msg" class="notice" hidden aria-live="polite"></div>
+    <div id="view"></div>
+  </main>
+  <dialog id="dlg" class="wide" aria-labelledby="dlgTitle">
+    <div class="dlg-head"><button class="btn secondary small" id="dlgClose" type="button">Fermer ✕</button></div>
+    <div class="dlg-body" id="dlgBody"></div>
+  </dialog>
+  <footer id="foot"></footer>
+
+  <script src="assets/config.js"></script>
+  <script src="assets/store.js"></script>
+  <script src="assets/ui.js"></script>
+  <script>
+    (function () {
+      var h = UI.h, view = document.getElementById('view'), msg = document.getElementById('msg');
+      var dlg = document.getElementById('dlg'), dlgBody = document.getElementById('dlgBody');
+      var user = null, fiches = [], pubs = {}, settings = { open: false, deadline: null };
+      var filters = { q: '', status: '' };
+      UI.mountChrome('gestion');
+      // L'espace de gestion n'a pas d'entrée dans la navigation publique.
+      var ORDER = { envoyee: 0, modifs: 1, brouillon: 2, validee: 3 };
+      var EDITABLE = ['title', 'members', 'summary', 'languages', 'theme', 'corpusLink', 'presentationLink', 'imageData', 'imageAlt', 'imageCredit', 'consent'];
+
+      function note(kind, text) { UI.message(msg, kind, text); if (text) window.scrollTo(0, 0); }
+      function norm(s) { return (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); }
+      function pubState(f) { return !f.published ? 'off' : (Store.samePub(f, pubs[f.id]) ? 'pub' : 'stale'); }
+      function pubBadge(f) {
+        var s = pubState(f);
+        return h('span', { class: 'badge ' + (s === 'pub' ? 'pub' : s === 'stale' ? 'stale' : 'off') }, s === 'pub' ? 'Publiée' : s === 'stale' ? 'À mettre à jour' : 'Non publiée');
+      }
+      function pick(o, keys) { var r = {}; keys.forEach(function (k) { r[k] = o[k]; }); return r; }
+
+      /* ---- Connexion ---- */
+      function loginView() {
+        var email = h('input', { type: 'email', id: 'em', autocomplete: 'email', placeholder: 'adresse de gestion' });
+        var pw = h('input', { type: 'password', id: 'pw', autocomplete: 'current-password' });
+        var err = h('p', { class: 'error', role: 'alert' });
+        function val() {
+          err.textContent = ''; var v = email.value.trim();
+          if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v)) { err.textContent = 'Saisissez une adresse e-mail valide.'; email.focus(); return null; }
+          return v;
+        }
+        var form = h('form', { novalidate: true, onsubmit: function (e) {
+          e.preventDefault(); var v = val(); if (!v) return;
+          if (!pw.value) { err.textContent = 'Saisissez votre mot de passe.'; pw.focus(); return; }
+          Store.signIn(v, pw.value).catch(function (e) { note('error', UI.friendlyError(e)); });
+        } },
+          h('div', { class: 'field' },
+            h('label', { class: 'lbl', for: 'em' }, 'Adresse e-mail de l’enseignante'),
+            h('p', { class: 'help' }, Store.live ? 'Seule l’adresse déclarée dans les règles de sécurité Firebase donne accès à cet espace. Le compte se crée dans la console Firebase (voir README, étape 5).' : 'Mode démonstration : saisissez enseignante@demo.local (n’importe quel mot de passe) pour accéder à la gestion.'),
+            email),
+          h('div', { class: 'field' }, h('label', { class: 'lbl', for: 'pw' }, 'Mot de passe'), pw, err),
+          h('div', { class: 'actions' },
+            h('button', { class: 'btn', type: 'submit' }, 'Se connecter'),
+            h('button', { class: 'btn secondary', type: 'button', onclick: function () {
+              var v = val(); if (!v) return;
+              Store.resetPassword(v).then(function () { note('ok', 'Si un compte existe pour cette adresse, un e-mail de réinitialisation vient d’être envoyé.'); }).catch(function (e) { note('error', UI.friendlyError(e)); });
+            } }, 'Mot de passe oublié')));
+        view.textContent = '';
+        view.append(h('div', { class: 'panel-box' }, h('h2', {}, 'Connexion'), form));
+      }
+
+      /* ---- Tableau de bord ---- */
+      function load() {
+        view.textContent = ''; view.append(h('p', {}, 'Chargement…'));
+        return Promise.all([Store.getSettings(), Store.listAll(), Store.listPublished()]).then(function (r) {
+          settings = r[0]; fiches = r[1]; pubs = {}; r[2].forEach(function (p) { pubs[p.id] = p; });
+          dashboard();
+        }).catch(function (e) {
+          view.textContent = '';
+          if (e && /permission-denied/.test(e.code || e.message)) {
+            var box = h('div', { class: 'panel-box' }, h('h2', {}, 'Accès refusé'),
+              h('p', {}, 'Le compte ' + user.email + ' n’a pas accès à l’espace de gestion.'));
+            if (Store.live && !user.verified) {
+              box.append(h('div', { class: 'notice warn' }, h('p', {}, 'Votre adresse e-mail n’est pas encore vérifiée, ce qui est exigé pour la gestion. Envoyez-vous l’e-mail de vérification, cliquez sur son lien, puis revenez ici.')),
+                h('div', { class: 'actions' },
+                  h('button', { class: 'btn', type: 'button', onclick: function () { Store.sendVerification().then(function () { note('ok', 'E-mail de vérification envoyé à ' + user.email + '.'); }).catch(function (e) { note('error', UI.friendlyError(e)); }); } }, 'Envoyer l’e-mail de vérification'),
+                  h('button', { class: 'btn secondary', type: 'button', onclick: function () { Store.refreshUser().then(function () { user.verified = true; return load(); }).catch(function (e) { note('error', UI.friendlyError(e)); }); } }, 'J’ai vérifié mon adresse : actualiser')));
+            }
+            box.append(h('div', { class: 'actions' }, h('button', { class: 'btn secondary', type: 'button', onclick: function () { Store.signOut(); } }, 'Se déconnecter')));
+            view.append(box);
+          } else note('error', UI.friendlyError(e));
+        });
+      }
+
+      function settingsBox() {
+        var open = h('input', { type: 'checkbox', id: 'sOpen' }); open.checked = !!settings.open;
+        var dl = h('input', { type: 'datetime-local', id: 'sDl', value: UI.toLocalInput(settings.deadline || Date.now() + 30 * 86400000) });
+        return h('div', { class: 'panel-box' }, h('h2', {}, 'Ouverture de la collecte'),
+          h('p', { class: 'help' }, 'Les groupes peuvent envoyer et modifier leurs fiches tant que la collecte est ouverte et que la date limite n’est pas dépassée. Une date limite est toujours nécessaire.'),
+          !settings.configured ? h('div', { class: 'notice warn' }, h('p', {}, 'La collecte n’a pas encore été ouverte : enregistrez ces paramètres pour permettre le dépôt des fiches.')) : null,
+          h('div', { class: 'settings' },
+            h('div', { class: 'check' }, open, h('label', { for: 'sOpen' }, 'Collecte ouverte')),
+            h('div', { class: 'field' }, h('label', { class: 'lbl', for: 'sDl' }, 'Date limite de modification'), dl),
+            h('button', { class: 'btn', type: 'button', onclick: function () {
+              var ms = new Date(dl.value).getTime();
+              if (!ms) { note('error', 'Indiquez une date limite valide.'); return; }
+              Store.saveSettings({ open: open.checked, deadline: ms }).then(function () { settings = { open: open.checked, deadline: ms, configured: true }; note('ok', 'Paramètres enregistrés.'); })
+                .catch(function (e) { note('error', UI.friendlyError(e)); });
+            } }, 'Enregistrer')));
+      }
+
+      function dashboard() {
+        view.textContent = '';
+        var counts = { total: fiches.length, envoyee: 0, modifs: 0, brouillon: 0, validee: 0, pub: 0 };
+        fiches.forEach(function (f) { counts[f.status]++; if (f.published) counts.pub++; });
+
+        var tools = [];
+        if (!Store.live) tools.push(h('div', { class: 'panel-box' }, h('h2', {}, 'Outils de démonstration'),
+          h('p', { class: 'help' }, 'Les exemples sont fictifs, étiquetés « [EXEMPLE] » et se suppriment en un clic.'),
+          h('div', { class: 'actions' },
+            h('button', { class: 'btn secondary small', type: 'button', onclick: function () { Store.loadSamples().then(load); } }, 'Charger des exemples'),
+            h('button', { class: 'btn secondary small', type: 'button', onclick: function () { Store.clearSamples().then(load); } }, 'Supprimer les exemples'),
+            h('button', { class: 'btn danger small', type: 'button', onclick: function () { if (confirm('Effacer toutes les données de démonstration de ce navigateur ?')) Store.resetAll().then(function () { location.reload(); }); } }, 'Tout réinitialiser'))));
+
+        var who = h('div', { class: 'panel-box' }, h('p', {}, 'Connectée : ', h('strong', {}, user.email), ' '),
+          h('button', { class: 'btn secondary small', type: 'button', onclick: function () { Store.signOut(); } }, 'Se déconnecter'));
+
+        var q = h('input', { type: 'search', id: 'fq', value: filters.q, placeholder: 'Titre ou nom d’étudiant', autocomplete: 'off' });
+        var st = h('select', { id: 'fs' }, h('option', { value: '' }, 'Tous les statuts'),
+          Object.keys(UI.STATUS).map(function (k) { return h('option', { value: k, selected: filters.status === k ? true : null }, UI.STATUS[k]); }));
+        var tbody = h('tbody');
+        function rows() {
+          tbody.textContent = '';
+          var list = fiches.filter(function (f) {
+            var qq = norm(filters.q);
+            return (!filters.status || f.status === filters.status) && (!qq || norm(f.title).indexOf(qq) >= 0 || norm(f.members).indexOf(qq) >= 0);
+          }).sort(function (a, b) { return (ORDER[a.status] - ORDER[b.status]) || (a.title || '').localeCompare(b.title || '', 'fr'); });
+          if (!list.length) tbody.append(h('tr', {}, h('td', { colspan: 7 }, fiches.length ? 'Aucune fiche ne correspond aux filtres.' : 'Aucune fiche pour le moment.')));
+          list.forEach(function (f) {
+            var miss = UI.missing(f);
+            tbody.append(h('tr', {},
+              h('td', {}, h('strong', {}, f.title || '(sans titre)')),
+              h('td', {}, (f.members || '').split(/\r?\n/).filter(Boolean).join(', ')),
+              h('td', {}, h('span', { class: 'badge ' + f.status }, UI.STATUS[f.status])),
+              h('td', {}, miss.length ? h('span', { class: 'missing' }, miss.join(', ')) : '—'),
+              h('td', {}, pubBadge(f)),
+              h('td', {}, UI.fmtDate(f.updatedAt)),
+              h('td', {}, h('button', { class: 'btn small', type: 'button', 'aria-label': 'Ouvrir la fiche ' + (f.title || ''), onclick: function () { openFiche(f); } }, 'Ouvrir'))));
+          });
+        }
+        q.addEventListener('input', function () { filters.q = q.value; rows(); });
+        st.addEventListener('change', function () { filters.status = st.value; rows(); });
+        rows();
+
+        var exportBtn = h('button', { class: 'btn secondary', type: 'button', onclick: exportCSV }, 'Exporter en tableau (CSV)');
+        var list = h('div', { class: 'panel-box' }, h('h2', {}, 'Fiches (' + counts.total + ')'),
+          h('p', { class: 'help' }, counts.envoyee + ' à vérifier · ' + counts.modifs + ' en attente de corrections · ' + counts.validee + ' validée(s) · ' + counts.brouillon + ' brouillon(s) · ' + counts.pub + ' publiée(s)'),
+          h('div', { class: 'toolbar' },
+            h('div', { class: 'field', style: 'margin:0;flex:1 1 240px' }, h('label', { class: 'lbl', for: 'fq' }, 'Rechercher'), q),
+            h('div', { class: 'field', style: 'margin:0;flex:0 1 260px' }, h('label', { class: 'lbl', for: 'fs' }, 'Statut'), st),
+            exportBtn),
+          h('div', { class: 'table-wrap' }, h('table', {},
+            h('caption', { class: 'sr-only' }, 'Liste des fiches déposées par les groupes'),
+            h('thead', {}, h('tr', {}, ['Intitulé', 'Étudiants', 'Statut', 'Informations manquantes', 'Publication', 'Dernière modification', 'Action'].map(function (t) { return h('th', { scope: 'col' }, t); }))),
+            tbody)));
+        UI.append(view, who, settingsBox(), list, tools);
+      }
+
+      function exportCSV() {
+        var head = ['Intitulé', 'Étudiants', 'Langues', 'Présentation du corpus', 'Thématique et objectifs', 'Lien corpus', 'Lien présentation', 'Texte alternatif image', 'Crédits image', 'Statut', 'Publication', 'Informations manquantes', 'Contact du groupe', 'Dernière modification'];
+        var rows = [head].concat(fiches.slice().sort(function (a, b) { return (a.title || '').localeCompare(b.title || '', 'fr'); }).map(function (f) {
+          var ps = pubState(f);
+          return [f.title, (f.members || '').split(/\r?\n/).filter(Boolean).join('; '), f.languages, f.summary, f.theme, f.corpusLink, f.presentationLink, f.imageAlt, f.imageCredit,
+            UI.STATUS[f.status], ps === 'pub' ? 'Publiée' : ps === 'stale' ? 'À mettre à jour' : 'Non publiée', UI.missing(f).join(', '), f.ownerEmail, UI.fmtDate(f.updatedAt)];
+        }));
+        UI.downloadCSV(rows, 'corpus-seminaire-' + new Date().toISOString().slice(0, 10) + '.csv');
+      }
+
+      /* ---- Fiche détaillée ---- */
+      function openFiche(f) {
+        var form = UI.buildForm({ data: f, readOnly: false });
+        var dmsg = h('div', { class: 'notice', hidden: true, role: 'alert' });
+        var cm = h('textarea', { id: 'cm', rows: 3, maxlength: 800, placeholder: 'Indiquez précisément ce que le groupe doit corriger ou compléter.' });
+        cm.value = f.adminComment || '';
+        var cmBox = h('div', { class: 'field', hidden: true }, h('label', { class: 'lbl', for: 'cm' }, 'Message au groupe (visible dans sa liste de fiches)'), cm);
+        var errBox = function (t) { UI.message(dmsg, 'error', t); };
+
+        function collect() {
+          var d = form.getData(), errs = UI.validate(d, false);
+          form.showErrors(errs);
+          if (Object.keys(errs).length) { errBox('Corrigez d’abord les champs signalés.'); return null; }
+          return d;
+        }
+        function done(text) { dlg.close(); note('ok', text); return load(); }
+        function fail(e) { errBox(UI.friendlyError(e)); }
+        function saveContent(d) { return Store.adminSave(f.id, pick(d, EDITABLE)); }
+        function merged(d, extra) { return Object.assign({}, f, d, extra || {}); }
+
+        var bSave = h('button', { class: 'btn', type: 'button', onclick: function () {
+          var d = collect(); if (!d) return; saveContent(d).then(function () { return done('Corrections enregistrées.'); }).catch(fail);
+        } }, 'Enregistrer les corrections');
+
+        var bAsk = h('button', { class: 'btn secondary', type: 'button', onclick: function () {
+          if (cmBox.hidden) { cmBox.hidden = false; cm.focus(); bAsk.textContent = 'Envoyer la demande de modifications'; return; }
+          if (!cm.value.trim()) { errBox('Rédigez le message à destination du groupe.'); cm.focus(); return; }
+          var d = collect(); if (!d) return;
+          if (f.published && !confirm('Cette fiche est publiée : elle sera retirée du microsite le temps des corrections. Continuer ?')) return;
+          saveContent(d).then(function () { return Store.adminSave(f.id, { status: 'modifs', adminComment: cm.value.trim() }); })
+            .then(function () { return f.published ? Store.unpublish(f.id) : null; })
+            .then(function () { return done('Modifications demandées au groupe.'); }).catch(fail);
+        } }, 'Demander des modifications');
+
+        var bValid = h('button', { class: 'btn secondary', type: 'button', onclick: function () {
+          var d = collect(); if (!d) return;
+          var errs = UI.validate(d, true); delete errs.consent;
+          if (Object.keys(errs).length) { form.showErrors(errs); errBox('Validation impossible : des informations obligatoires manquent (voir les champs signalés). Complétez-les ou demandez des modifications au groupe.'); return; }
+          saveContent(d).then(function () { return Store.adminSave(f.id, { status: 'validee' }); })
+            .then(function () { return done('Fiche validée. Vous pouvez maintenant la publier.'); }).catch(fail);
+        } }, 'Valider la fiche');
+
+        var acts = h('div', { class: 'actions' }, bSave, bValid, bAsk);
+
+        // Publication
+        var ps = pubState(f);
+        function publish(label) {
+          var d = collect(); if (!d) return;
+          if (!UI.safeUrl(d.presentationLink)) { errBox('Publication impossible : le lien vers la présentation est manquant ou invalide.'); return; }
+          if (!d.imageData || !d.imageAlt) { errBox('Publication impossible : l’image et son texte alternatif sont nécessaires.'); return; }
+          var errs = UI.validate(d, true); delete errs.consent;
+          if (Object.keys(errs).length) { form.showErrors(errs); errBox('Publication impossible : des informations obligatoires manquent.'); return; }
+          saveContent(d).then(function () { return Store.adminSave(f.id, { status: 'validee' }); })
+            .then(function () { return Store.publish(merged(d, { status: 'validee' })); })
+            .then(function () { return done(label); }).catch(fail);
+        }
+        if (ps === 'off') acts.append(h('button', { class: 'btn', type: 'button', onclick: function () { publish('Fiche validée et publiée sur le microsite.'); } }, 'Valider et publier'));
+        if (ps === 'stale') acts.append(h('button', { class: 'btn', type: 'button', onclick: function () { publish('Publication mise à jour.'); } }, 'Mettre à jour la publication'));
+        if (ps !== 'off') acts.append(h('button', { class: 'btn danger', type: 'button', onclick: function () {
+          Store.unpublish(f.id).then(function () { return done('Fiche dépubliée : elle n’apparaît plus sur le microsite.'); }).catch(fail);
+        } }, 'Dépublier'));
+        acts.append(h('button', { class: 'btn danger', type: 'button', onclick: function () {
+          if (!confirm('Supprimer définitivement cette fiche (et sa publication éventuelle) ?')) return;
+          (f.published ? Store.unpublish(f.id) : Promise.resolve()).then(function () { return Store.deleteFiche(f.id); })
+            .then(function () { return done('Fiche supprimée.'); }).catch(fail);
+        } }, 'Supprimer'));
+
+        dlgBody.textContent = '';
+        UI.append(dlgBody,
+          h('h2', { id: 'dlgTitle' }, f.title || '(sans titre)'),
+          h('p', {}, h('span', { class: 'badge ' + f.status }, UI.STATUS[f.status]), ' ', pubBadge(f), ' ',
+            f.ownerEmail && /^[^@\s<>"]+@[^@\s<>"]+$/.test(f.ownerEmail) ? h('a', { href: 'mailto:' + f.ownerEmail + '?subject=' + encodeURIComponent('Fiche corpus : ' + (f.title || '')) }, 'Écrire au groupe (' + f.ownerEmail + ')') : null),
+          ps === 'stale' ? h('div', { class: 'notice warn' }, h('p', {}, 'La fiche a été modifiée depuis sa publication : le microsite affiche encore l’ancienne version.')) : null,
+          UI.missing(f).length ? h('div', { class: 'notice warn' }, h('p', {}, 'Informations manquantes : ' + UI.missing(f).join(', ') + '.')) : null,
+          form.el, cmBox, dmsg, acts);
+        dlg.showModal();
+      }
+      document.getElementById('dlgClose').addEventListener('click', function () { dlg.close(); });
+
+      /* ---- Démarrage ---- */
+      Store.init().catch(function (e) { note('error', UI.friendlyError(e)); })
+        .then(function () { Store.onAuth(function (u) { user = u; if (!u) loginView(); else load(); }); });
+    })();
+  </script>
+</body>
+</html>

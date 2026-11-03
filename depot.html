@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Déposer ma fiche</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <header id="top"></header>
+  <main class="wrap" id="main">
+    <h1>Déposer la fiche de mon corpus</h1>
+    <p class="lead">Chaque groupe remplit une fiche par corpus. Vous pouvez l’enregistrer en brouillon, la modifier jusqu’à la date limite, puis l’envoyer. L’enseignante la vérifie avant toute publication.</p>
+    <div id="info" class="notice" hidden></div>
+    <div id="msg" class="notice" hidden aria-live="polite"></div>
+    <div id="view"></div>
+  </main>
+  <footer id="foot"></footer>
+
+  <script src="assets/config.js"></script>
+  <script src="assets/store.js"></script>
+  <script src="assets/ui.js"></script>
+  <script>
+    (function () {
+      var h = UI.h, view = document.getElementById('view'), msg = document.getElementById('msg'), info = document.getElementById('info');
+      var user = null, settings = { open: false, deadline: null }, editing = null, lastAction = null;
+      UI.mountChrome('depot');
+
+      function isOpen() { return settings.open && settings.deadline && Date.now() < settings.deadline; }
+      function editable(f) { return isOpen() && ['brouillon', 'envoyee', 'modifs'].indexOf(f.status) >= 0; }
+      function note(kind, text) { UI.message(msg, kind, text); if (text) msg.scrollIntoView({ block: 'nearest' }); }
+
+      function renderInfo() {
+        if (!settings.configured && !settings.open) UI.message(info, 'warn', 'La collecte n’est pas encore ouverte.');
+        else if (!settings.open) UI.message(info, 'warn', 'La collecte est fermée : vous pouvez consulter vos fiches mais plus les modifier.');
+        else if (Date.now() >= settings.deadline) UI.message(info, 'warn', 'La date limite est dépassée (' + UI.fmtDate(settings.deadline) + ') : les fiches ne sont plus modifiables.');
+        else UI.message(info, '', 'Vous pouvez envoyer et modifier vos fiches jusqu’au ' + UI.fmtDate(settings.deadline) + '.');
+      }
+
+      /* ---- Connexion ---- */
+      function loginView() {
+        var email = h('input', { type: 'email', id: 'em', autocomplete: 'email', placeholder: 'prenom.nom@exemple.fr' });
+        var pw = h('input', { type: 'password', id: 'pw', autocomplete: 'current-password', minlength: 8 });
+        var err = h('p', { class: 'error', role: 'alert' });
+        function creds(needStrong) {
+          err.textContent = '';
+          var e = email.value.trim(), p = pw.value;
+          if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) { err.textContent = 'Saisissez une adresse e-mail valide.'; email.focus(); return null; }
+          if (needStrong !== false && p.length < 8) { err.textContent = 'Le mot de passe doit comporter au moins 8 caractères.'; pw.focus(); return null; }
+          return { e: e, p: p };
+        }
+        function run(fn) { return function () { var c = creds(fn !== 'reset'); if (!c) return; note('', ''); var btns = form.querySelectorAll('button'); btns.forEach(function (b) { b.disabled = true; });
+          var pr = fn === 'in' ? Store.signIn(c.e, c.p) : fn === 'up' ? Store.signUp(c.e, c.p) : Store.resetPassword(c.e).then(function () { note('ok', 'Si un compte existe pour cette adresse, un e-mail de réinitialisation vient d’être envoyé.'); });
+          pr.catch(function (e) { note('error', UI.friendlyError(e)); }).then(function () { btns.forEach(function (b) { b.disabled = false; }); }); }; }
+        var form = h('form', { novalidate: true, onsubmit: function (e) { e.preventDefault(); run('in')(); } },
+          h('div', { class: 'field' },
+            h('label', { class: 'lbl', for: 'em' }, 'Adresse e-mail de la personne référente du groupe'),
+            h('p', { class: 'help' }, 'Une seule adresse par groupe : c’est elle qui donne accès aux fiches du groupe. Elle n’est jamais publiée ; seule l’enseignante y a accès.'),
+            email),
+          h('div', { class: 'field' },
+            h('label', { class: 'lbl', for: 'pw' }, 'Mot de passe'),
+            h('p', { class: 'help' }, 'Au moins 8 caractères. Premier accès : choisissez un mot de passe et cliquez sur « Créer le compte du groupe ». Ensuite : « Se connecter ». Partagez-le uniquement avec les membres de votre groupe.'),
+            pw, err),
+          h('div', { class: 'actions' },
+            h('button', { type: 'submit', class: 'btn' }, 'Se connecter'),
+            h('button', { type: 'button', class: 'btn secondary', onclick: run('up') }, 'Créer le compte du groupe'),
+            h('button', { type: 'button', class: 'btn secondary', onclick: run('reset') }, 'Mot de passe oublié')));
+        view.textContent = '';
+        view.append(h('div', { class: 'panel-box' }, h('h2', {}, 'Accéder à mes fiches'), form));
+      }
+
+      /* ---- Liste des fiches du groupe ---- */
+      function listView() {
+        editing = null; view.textContent = '';
+        var bar = h('div', { class: 'panel-box' },
+          h('p', {}, 'Connecté avec ', h('strong', {}, user.email), ' '),
+          h('button', { class: 'btn secondary small', type: 'button', onclick: function () { Store.signOut(); } }, 'Se déconnecter'));
+        var box = h('div', { class: 'panel-box' }, h('h2', {}, 'Mes fiches'), h('p', {}, 'Chargement…'));
+        view.append(bar, box);
+        Store.listMine(user.uid).then(function (list) {
+          list.sort(function (a, b) { return (a.createdAt || 0) - (b.createdAt || 0); });
+          box.textContent = ''; box.append(h('h2', {}, 'Mes fiches'));
+          if (!list.length) box.append(h('p', {}, 'Vous n’avez pas encore de fiche.'));
+          else box.append(h('ul', { class: 'fiche-list' }, list.map(function (f) {
+            return h('li', {},
+              h('div', {}, h('strong', {}, f.title || '(sans titre)'), h('br'), h('span', { class: 'badge ' + f.status }, UI.STATUS[f.status] || f.status),
+                f.status === 'modifs' && f.adminComment ? h('div', { class: 'notice warn' }, h('p', {}, h('strong', {}, 'Demande de l’enseignante : ')), h('p', { style: 'white-space:pre-line' }, f.adminComment)) : null),
+              h('button', { class: 'btn small' + (editable(f) ? '' : ' secondary'), type: 'button', onclick: function () { formView(f); } }, editable(f) ? 'Modifier' : 'Consulter'));
+          })));
+          if (isOpen()) box.append(h('div', { class: 'actions' }, h('button', { class: 'btn', type: 'button', onclick: function () { formView(null); } }, 'Créer une nouvelle fiche')));
+        }).catch(function (e) { box.textContent = ''; box.append(h('p', { class: 'error' }, UI.friendlyError(e))); });
+      }
+
+      /* ---- Formulaire ---- */
+      function formView(f) {
+        editing = f; note('', '');
+        var ro = f ? !editable(f) : !isOpen();
+        var form = UI.buildForm({ data: f || {}, readOnly: ro });
+        var id = f && f.id;
+        view.textContent = '';
+        var box = h('div', { class: 'panel-box' }, h('h2', {}, f ? 'Fiche : ' + (f.title || '(sans titre)') : 'Nouvelle fiche'));
+        if (ro) box.append(h('div', { class: 'notice warn' }, h('p', {}, f && f.status === 'validee' ? 'Cette fiche a été validée par l’enseignante : elle n’est plus modifiable. Pour une correction, contactez-la.' : 'Cette fiche n’est plus modifiable.')));
+        box.append(h('p', { class: 'help' }, 'Les champs marqués « obligatoire » sont nécessaires pour envoyer la fiche. Pour un simple brouillon, seul l’intitulé est requis.'), form.el);
+
+        function save(status, done) {
+          var d = form.getData(); d.status = status;
+          var errs = UI.validate(d, status === 'envoyee');
+          form.showErrors(errs);
+          if (Object.keys(errs).length) { note('error', 'Certaines informations sont à corriger : voir les messages sous les champs concernés.'); return; }
+          buttons.forEach(function (b) { b.disabled = true; });
+          Store.saveFiche(id, d, user).then(function () { done(d); })
+            .catch(function (e) { note('error', UI.friendlyError(e)); buttons.forEach(function (b) { b.disabled = false; }); });
+        }
+        var buttons = [];
+        if (!ro) {
+          var send = h('button', { class: 'btn', type: 'button', onclick: function () {
+            save('envoyee', function (d) { confirmView(d.title); });
+          } }, f && f.status !== 'brouillon' ? 'Renvoyer la fiche' : 'Envoyer la fiche');
+          var draft = h('button', { class: 'btn secondary', type: 'button', onclick: function () {
+            save('brouillon', function () { listView(); note('ok', 'Brouillon enregistré. Il n’est pas visible par l’enseignante tant que vous ne l’avez pas envoyé.'); });
+          } }, 'Enregistrer comme brouillon');
+          buttons.push(send, draft);
+          box.append(h('div', { class: 'actions' }, send, draft));
+        }
+        var back = h('button', { class: 'btn secondary', type: 'button', onclick: function () { note('', ''); listView(); } }, ro ? 'Retour à mes fiches' : 'Annuler');
+        var acts = box.querySelector('.actions') || box.appendChild(h('div', { class: 'actions' }));
+        acts.append(back);
+        if (f && f.status === 'brouillon' && !ro) acts.append(h('button', { class: 'btn danger', type: 'button', onclick: function () {
+          if (confirm('Supprimer définitivement ce brouillon ?')) Store.deleteFiche(id).then(function () { listView(); note('ok', 'Brouillon supprimé.'); }).catch(function (e) { note('error', UI.friendlyError(e)); });
+        } }, 'Supprimer ce brouillon'));
+        view.append(box);
+        window.scrollTo(0, 0);
+      }
+
+      function confirmView(title) {
+        note('', ''); view.textContent = '';
+        view.append(h('div', { class: 'panel-box', role: 'status' },
+          h('h2', {}, 'Fiche envoyée ✓'),
+          h('p', {}, 'La fiche « ' + title + ' » a bien été envoyée à l’enseignante, qui la vérifiera.'),
+          h('p', {}, 'Vous pourrez la modifier jusqu’au ' + UI.fmtDate(settings.deadline) + '. Si des corrections sont demandées, vous les verrez dans la liste de vos fiches. La fiche ne sera publiée qu’après validation.'),
+          h('div', { class: 'actions' }, h('button', { class: 'btn', type: 'button', onclick: listView }, 'Retour à mes fiches'))));
+        window.scrollTo(0, 0);
+      }
+
+      /* ---- Démarrage ---- */
+      Store.init().then(function () { return Store.getSettings(); }).catch(function () { return settings; })
+        .then(function (s) {
+          settings = s; renderInfo();
+          Store.onAuth(function (u) { user = u; if (!u) loginView(); else if (!editing) listView(); });
+        }).catch(function (e) { note('error', UI.friendlyError(e)); });
+    })();
+  </script>
+</body>
+</html>
