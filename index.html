@@ -88,7 +88,7 @@
         var list = items.filter(function (f) { return !q || norm(f.title).indexOf(q) >= 0 || norm(f.members).indexOf(q) >= 0; });
         grid.textContent = '';
         list.forEach(function (f) { grid.append(card(f)); });
-        count.textContent = items.length ? list.length + ' travail' + (list.length > 1 ? 'x' : '') + ' affiché' + (list.length > 1 ? 's' : '') + ' sur ' + items.length : '';
+        count.textContent = items.length ? list.length + (list.length > 1 ? ' travaux' : ' travail') + ' affiché' + (list.length > 1 ? 's' : '') + ' sur ' + items.length : '';
         empty.hidden = list.length > 0;
         empty.textContent = items.length ? 'Aucun travail ne correspond à votre recherche.' : 'Les travaux seront publiés ici après le séminaire. Revenez bientôt.';
       }
